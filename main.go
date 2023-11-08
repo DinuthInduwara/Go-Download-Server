@@ -122,7 +122,8 @@ func main() {
 			w.Write([]byte("Task Cancelled..."))
 			return
 		}
-		http.Error(w, "No Task Found", http.StatusNotFound)
+
+		http.Error(w, "No Downloading Task", http.StatusBadRequest)
 
 	})
 
@@ -163,6 +164,23 @@ func main() {
 			http.Error(w, "Failed to write JSON response", http.StatusInternalServerError)
 			return
 		}
+	})
+
+	mux.HandleFunc("/yt-dlp", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		url := r.FormValue("url")
+		if url == "" {
+			http.Error(w, "`url` required", http.StatusLocked)
+			return
+		}
+
+		go utils.DownloadYTDLP(url, dir, Downloads)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("Task Added To Queue"))
 	})
 
 	mux.Handle("/", handler)
