@@ -43,16 +43,7 @@ func (d *DownloadFile) Percentage() float32 {
 	return (float32(d.DownloadedSize) / float32(d.Size)) * 100.0
 }
 
-var Downloads = []*DownloadFile{}
-
-func IndexOf[T comparable](arr []T, item T) int {
-	for i, val := range arr {
-		if val == item {
-			return i
-		}
-	}
-	return -1
-}
+var Downloads = make(map[string]*DownloadFile)
 
 func main() {
 	// Specify the directory you want to serve files from
@@ -179,15 +170,15 @@ func main() {
 			// create buffer chunk size
 			buffer := make([]byte, 1024)
 
-			// append download object to list
-			Downloads = append(Downloads, download)
+			// add download object to map
+			Downloads[download.Url] = download
 
 			for {
 				select {
 				case <-download.Cancel:
 					log.Println("Download canceled.")
-					index := IndexOf(Downloads, download)
-					Downloads = append(Downloads[:index], Downloads[index+1:]...)
+					close(download.Cancel)
+					delete(Downloads, download.Url)
 					return
 				default:
 					n, err := resp.Body.Read(buffer)
@@ -210,8 +201,7 @@ func main() {
 
 					if err == io.EOF {
 						download.Completed = true
-						index := IndexOf(Downloads, download)
-						Downloads = append(Downloads[:index], Downloads[index+1:]...)
+						delete(Downloads, download.Url)
 						close(download.Cancel)
 						return
 					}
@@ -236,18 +226,13 @@ func main() {
 			return
 		}
 
-		for _, i := range Downloads {
-			if i.Url == url {
-				i.Cancel <- true // canceling download
-				close(i.Cancel)  // close cancel channel
-
-				err := os.Remove(dir + "/" + i.Fname) // delete uncompleted file
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
+		if task := Downloads[url]; task != nil {
+			task.Cancel <- true
+			w.Write([]byte("Task Cancelled..."))
+			return
 		}
+		http.Error(w, "No Task Found", http.StatusNotFound)
+
 	})
 
 	// create a ServeMux to handle send download status
