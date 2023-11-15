@@ -13,6 +13,7 @@
   - [Download Files](#download-files)
   - [Cancel Downloads](#cancel-downloads)
   - [Get Download Status](#get-download-status)
+  - [Yt-Dlp Support](#Yt-Dlp Support)
 - [Notes](#notes)
 - [License](#license)
 
@@ -49,7 +50,7 @@ Make sure you have Go installed on your system.
 # Endpoints
 
 ## Serve Static Files
-The server serves static files from the `./static` directory. You can access these files by visiting http://localhost:8080/<file-url>
+The server serves static files from the `./static` directory. You can access these files by visiting http://localhost:8080/fs<file-url>
 
 
 ## Delete Files
@@ -79,6 +80,14 @@ You can check the status of ongoing downloads by sending a GET request to the `/
 Example:
 
     curl http://localhost:8080/status
+
+
+## Yt-Dlp Support
+Example:
+
+    curl -X POST -d "url=<file-url>" http://localhost:8080/yt-dlp
+
+
 ## Notes
 - The server uses a default directory of ./static for serving files. You can change this directory in the main function.
 

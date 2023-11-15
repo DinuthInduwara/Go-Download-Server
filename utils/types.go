@@ -6,9 +6,9 @@ import (
 )
 
 type DownloadFile struct {
-	Url            string `json:"original_url"`
-	Fname          string `json:"filename"`
-	Size           int64  `json:"filesize_approx"`
+	Url            string
+	Fname          string
+	Size           int64
 	Completed      bool
 	Cancel         chan bool
 	DownloadedSize int64

@@ -10,18 +10,15 @@ import (
 )
 
 var Downloads = make(map[string]*utils.DownloadFile)
+var Encrypting = make(map[string]*utils.CryptFile)
 
 func main() {
 	// Specify the directory you want to serve files from
 	dir := "./static"
 
-	// Create a file server handler
-	fs := http.FileServer(http.Dir(dir))
-
 	// Create a custom handler to log requests
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL)
-		fs.ServeHTTP(w, r)
 	})
 
 	// Create a ServeMux to handle custom routes
@@ -137,9 +134,17 @@ func main() {
 			Speed           string  `json:"speed"`
 			Url             string  `json:"url"`
 		}
-		var arr = []*ResponseCreator{}
+		type crypting struct {
+			FSize       int64  `json:"fsize"`
+			Fname       string `json:"filename"`
+			Mode        string `json:"mode"`
+			CryptedSize int64  `json:"cryptedSize"`
+			Percentage  int    `json:"percentage"`
+		}
+
+		var downloadArr = []*ResponseCreator{}
 		for _, item := range Downloads {
-			arr = append(arr, &ResponseCreator{
+			downloadArr = append(downloadArr, &ResponseCreator{
 				Size:            item.Size,
 				DownloadedBytes: item.DownloadedSize,
 				Fname:           item.Fname,
@@ -149,7 +154,21 @@ func main() {
 			})
 		}
 
-		responseData, err := json.Marshal(arr)
+		var cryptingArr = []*crypting{}
+		for _, item := range Encrypting {
+			cryptingArr = append(cryptingArr, &crypting{
+				FSize:       item.FSize,
+				Fname:       item.Fname,
+				Mode:        item.Task,
+				CryptedSize: item.CryperdSize,
+				Percentage:  item.Percentage(),
+			})
+		}
+
+		combinedData := make(map[string]interface{})
+		combinedData["downloads"] = downloadArr
+		combinedData["crypting"] = cryptingArr
+		responseData, err := json.Marshal(combinedData)
 		if err != nil {
 			http.Error(w, "Failed to marshal JSON", http.StatusInternalServerError)
 			return
@@ -183,6 +202,8 @@ func main() {
 		w.Write([]byte("Task Added To Queue"))
 	})
 
+	// Register the file server at the "/fs" route
+	mux.Handle("/fs/", http.StripPrefix("/fs", http.FileServer(http.Dir(dir))))
 	mux.Handle("/", handler)
 
 	server := &http.Server{
