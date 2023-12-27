@@ -3,9 +3,11 @@ package main
 import (
 	"DinuthInduwara/GoMirrorServer/utils"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,15 +122,27 @@ func main() {
 			return
 		}
 
-		url := r.FormValue("url")
+		link := r.FormValue("url")
 		fname := r.FormValue("file_name")
 
-		if fname == "" {
-			parts := strings.Split(url, "/")
-			fname = parts[len(parts)-1]
+		if _, ok := Downloads[link]; ok {
+			w.Write([]byte("Task Already In The Queue"))
+			return
 		}
 
-		download := utils.NewDownloader(url, dir, fname)
+		if fname == "" {
+			parsedURL, err := url.Parse(link)
+			if err != nil {
+				err = fmt.Errorf("error parsing URL: %s", err)
+				log.Println(err)
+				w.Write([]byte(err.Error()))
+				return
+			}
+			path := strings.Split(parsedURL.Path, "/")
+			fname = path[len(path)-1]
+		}
+
+		download := utils.NewDownloader(link, dir, fname)
 
 		go utils.DoDownload(Downloads, download)
 		w.WriteHeader(http.StatusCreated)
@@ -149,8 +163,9 @@ func main() {
 		}
 
 		if task, done := Downloads[url]; done {
-			task.CancelChan <- true
+			task.Cancel()
 			w.Write([]byte("Task Cancelled..."))
+			delete(Downloads, task.Url)
 			return
 		}
 
@@ -167,6 +182,7 @@ func main() {
 			Speed           float64 `json:"speed"`
 			Url             string  `json:"url"`
 			Paused          bool    `json:"paused"`
+			Error           error   `json:"error"`
 		}
 		type crypting struct {
 			FSize       int64  `json:"fsize"`
@@ -185,6 +201,7 @@ func main() {
 				Speed:           item.Speed(),
 				Url:             item.Url,
 				Paused:          item.IsPaused(),
+				Error:           item.Error,
 			})
 		}
 
@@ -334,11 +351,12 @@ func loggingMiddleware(next http.Handler) http.Handler {
 
 		// Log the request information
 		log.Printf(
-			"[%s] %s %s %s",
+			"[%s] %s %s %s %d",
 			r.Method,
 			r.RemoteAddr,
 			r.URL.Path,
 			time.Since(start),
+			r.ContentLength,
 		)
 
 		// Call the next handler in the chain

@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -33,6 +34,7 @@ type DownloadFile struct {
 	Started        time.Time
 	CancelChan     chan bool
 	PauseChan      chan bool
+	Error          error
 }
 
 func (d *DownloadFile) Speed() float64 {
@@ -58,17 +60,26 @@ func (d *DownloadFile) Pause() string {
 	}
 	return "Task Already Paused"
 }
-func (d *DownloadFile) Resume() {
+
+func (d *DownloadFile) Cancel() bool {
+	if !d.canceled && !d.Completed { // if not already cancelled and not completed then cancel download progress
+		d.CancelChan <- true
+		return true
+	}
+	return false
+}
+
+func (d *DownloadFile) Resume() bool {
 
 	if !d.IsPaused() {
-		return
+		return true
 	}
 
 	// create request
 	req, err := http.NewRequest("GET", d.Url, nil)
 	if err != nil {
-		log.Println("Error creating HTTP request:", err)
-		return
+		log_and_set_error(d, "error creating HTTP request", err)
+		return true
 	}
 	info, err := os.Stat(d.Fname)
 	if err != nil {
@@ -81,14 +92,22 @@ func (d *DownloadFile) Resume() {
 	// send the HTTP request
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Println("Error making HTTP request:", err)
-		return
+		log_and_set_error(d, "error making HTTP request", err)
+		return true
+	}
+	if resp.StatusCode != 200 {
+		if resp.StatusCode == 416 {
+			d.Completed = true
+			return false
+		}
+		log_and_set_error(d, resp.Status, err)
+		return true
 	}
 	defer resp.Body.Close()
 	d.paused = false
 
 	// update file total size and started time
-	d.Size = resp.ContentLength
+	d.Size = resp.ContentLength + d.DownloadedSize // total size with downloaded part
 	d.Started = time.Now()
 
 	// create buffer chunk size
@@ -97,8 +116,8 @@ func (d *DownloadFile) Resume() {
 	//open output file
 	outputFile, err := os.OpenFile(d.Fname, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
-		log.Printf("Error opening the output file: %s", err)
-		return
+		log_and_set_error(d, "error opening the output file", err)
+		return true
 	}
 	defer outputFile.Close()
 	for {
@@ -108,23 +127,23 @@ func (d *DownloadFile) Resume() {
 			close(d.CancelChan)
 			close(d.PauseChan)
 			d.canceled = true
-			return
+			return true
 		case <-d.PauseChan:
 			log.Printf("[*] Download paused: %s", d.Url)
-			return
+			return true
 		default:
 			n, err := resp.Body.Read(buffer)
 			if err != nil && err != io.EOF {
-				log.Println("Error reading from response:", err)
-				return
+				log_and_set_error(d, "error reading from response", err)
+				return true
 			}
 
 			if n > 0 {
 				// Write the chunk to the output file
 				_, err := outputFile.Write(buffer[:n])
 				if err != nil {
-					log.Println("Error writing to the output file:", err)
-					return
+					log_and_set_error(d, "error writing to the output file", err)
+					return true
 				}
 
 				// Update DownloadedSize
@@ -135,9 +154,15 @@ func (d *DownloadFile) Resume() {
 				d.Completed = true
 				close(d.CancelChan)
 				close(d.PauseChan)
-				return
+				return true
 			}
 		}
 	}
 
+}
+
+func log_and_set_error(d *DownloadFile, msg string, err error) {
+	err = fmt.Errorf("%s: %s", msg, err)
+	d.Error = err
+	log.Println(err)
 }
