@@ -65,8 +65,8 @@ func DownloadYTDLP(url, dir string, Downloads map[string]*DownloadFile) {
 	Downloads[url] = info
 	for {
 		select {
-		case <-info.Cancel:
-			log.Println("Download canceled.")
+		case <-info.CancelChan:
+			log.Println("Download canceled.", info.Fname)
 			return
 		default:
 			n, err := stdout.Read(buffer)
@@ -129,7 +129,7 @@ func getInfo(jsonFile string) (*DownloadFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	data.Cancel = make(chan bool)
+	data.CancelChan = make(chan bool)
 
 	return &data, nil
 }

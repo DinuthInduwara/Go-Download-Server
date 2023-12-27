@@ -3,10 +3,15 @@ package main
 import (
 	"DinuthInduwara/GoMirrorServer/utils"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/gorilla/mux"
 )
 
 var Downloads = make(map[string]*utils.DownloadFile)
@@ -16,13 +21,9 @@ func main() {
 	// Specify the directory you want to serve files from
 	dir := "./static"
 
-	// Create a custom handler to log requests
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL)
-	})
-
 	// Create a ServeMux to handle custom routes
-	mux := http.NewServeMux()
+	mux := mux.NewRouter()
+	mux.Use(loggingMiddleware)
 
 	//  Create a ServeMux to handle delete files
 	mux.HandleFunc("/delete", func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +83,38 @@ func main() {
 		w.Write([]byte("File renamed successfully"))
 	})
 
-	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+	// resume direct download task
+	mux.HandleFunc("/resume", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		url := r.FormValue("url")
+		if download, done := Downloads[url]; done {
+			go utils.DoDownload(Downloads, download)
+			w.Write([]byte("Task Resumed"))
+			return
+		}
+		w.Write([]byte("No Task Resumed"))
+	})
+
+	// Pause direct downloads
+	mux.HandleFunc("/pause", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		url := r.FormValue("url")
+		if download, ok := Downloads[url]; ok {
+			message := download.Pause()
+			w.Write([]byte(message))
+		}
+		w.Write([]byte("No Download Task To Pause"))
+
+	})
+
+	// create direct download task
+	mux.HandleFunc("/direct-download", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -91,19 +123,21 @@ func main() {
 		url := r.FormValue("url")
 		fname := r.FormValue("file_name")
 
-		if fname == "" || url == "" {
-			http.Error(w, "`file_name` and `url` required", http.StatusLocked)
-			return
+		if fname == "" {
+			parts := strings.Split(url, "/")
+			fname = parts[len(parts)-1]
 		}
 
-		go utils.DownloadDirect(dir, url, fname, Downloads)
+		download := utils.NewDownloader(url, dir, fname)
+
+		go utils.DoDownload(Downloads, download)
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("Task Added To Queue"))
 	})
 
 	// create a ServeMux to handle cancel downloads
 	mux.HandleFunc("/cancel", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut {
+		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -114,8 +148,8 @@ func main() {
 			return
 		}
 
-		if task := Downloads[url]; task != nil {
-			task.Cancel <- true
+		if task, done := Downloads[url]; done {
+			task.CancelChan <- true
 			w.Write([]byte("Task Cancelled..."))
 			return
 		}
@@ -130,9 +164,9 @@ func main() {
 			Size            int64   `json:"size"`
 			DownloadedBytes int64   `json:"downloaded"`
 			Fname           string  `json:"fname"`
-			Percentage      float32 `json:"percentage"`
-			Speed           string  `json:"speed"`
+			Speed           float64 `json:"speed"`
 			Url             string  `json:"url"`
+			Paused          bool    `json:"paused"`
 		}
 		type crypting struct {
 			FSize       int64  `json:"fsize"`
@@ -148,9 +182,9 @@ func main() {
 				Size:            item.Size,
 				DownloadedBytes: item.DownloadedSize,
 				Fname:           item.Fname,
-				Percentage:      item.Percentage(),
 				Speed:           item.Speed(),
 				Url:             item.Url,
+				Paused:          item.IsPaused(),
 			})
 		}
 
@@ -185,6 +219,7 @@ func main() {
 		}
 	})
 
+	// create a ServeMux to handle Yt-dlp downloads
 	mux.HandleFunc("/yt-dlp", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -202,9 +237,83 @@ func main() {
 		w.Write([]byte("Task Added To Queue"))
 	})
 
+	// create a ServeMux to handle encrypt files
+	mux.HandleFunc("/sys", func(w http.ResponseWriter, r *http.Request) {
+		rclone_tasks := func() int {
+			req, _ := http.NewRequest("POST", "http://127.0.0.1:5572/core/stats", nil)
+			client := &http.Client{}
+			response, err := client.Do(req)
+
+			if err != nil {
+				log.Fatal("Error GET RCLONE Tasks request: ", err)
+				return 0
+			}
+			defer response.Body.Close()
+			type FileTransferResponse struct {
+				Transferring []interface{} `json:"transferring"`
+			}
+			// Read response body
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				log.Fatal("Error reading response body: ", err)
+				return 0
+			}
+
+			// Parse JSON response
+			var fileTransferResponse FileTransferResponse
+			err = json.Unmarshal(body, &fileTransferResponse)
+			if err != nil {
+				log.Fatal("Error parsing JSON: ", err)
+				return 0
+			}
+			return len(fileTransferResponse.Transferring)
+		}()
+
+		type ServerStatus struct {
+			Cpu           int     `json:"cpu"`
+			MemTot        uint64  `json:"mem_total"`
+			MemUse        uint64  `json:"mem_used"`
+			DiskUsed      uint64  `json:"disk_used"`
+			DiskTotal     uint64  `json:"disk_total"`
+			DownloadFSize int64   `json:"down_size"`
+			DownloadSpeed float64 `json:"down_speed"`
+			UploadSpeed   float64 `json:"up_speed"`
+			NetUsage      uint64  `json:"net_usage"`
+			FolderCount   int     `json:"folder_count"`
+			FileCount     int     `json:"file_count"`
+			Downloads     int     `json:"download_tasks"`
+			RcloneTrans   int     `json:"rclone_tasks"`
+		}
+		disk := utils.Disk()
+		down, up := utils.NetworkSpeed(time.Second)
+		files, folders := utils.CountFilesAndFolders(dir)
+		res := ServerStatus{
+			Cpu:           utils.CpuCount(),
+			MemTot:        utils.Memory().Total,
+			MemUse:        utils.Memory().Used,
+			DiskUsed:      disk.Used,
+			DiskTotal:     disk.Total,
+			DownloadFSize: utils.FolderSize(dir),
+			DownloadSpeed: down,
+			UploadSpeed:   up,
+			NetUsage:      utils.NetUsageStats(),
+			FolderCount:   folders,
+			FileCount:     files,
+			Downloads:     len(Downloads),
+			RcloneTrans:   rclone_tasks,
+		}
+		responseData, err := json.Marshal(res)
+		if err != nil {
+			http.Error(w, "Failed to marshal JSON", http.StatusInternalServerError)
+			log.Println(err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(responseData)
+	})
+
 	// Register the file server at the "/fs" route
-	mux.Handle("/fs/", http.StripPrefix("/fs", http.FileServer(http.Dir(dir))))
-	mux.Handle("/", handler)
+	mux.PathPrefix("/fs/").Handler(http.StripPrefix("/fs/", http.FileServer(http.Dir(dir))))
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -217,4 +326,22 @@ func main() {
 	if err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Log the request information
+		log.Printf(
+			"[%s] %s %s %s",
+			r.Method,
+			r.RemoteAddr,
+			r.URL.Path,
+			time.Since(start),
+		)
+
+		// Call the next handler in the chain
+		next.ServeHTTP(w, r)
+	})
 }
